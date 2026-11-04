@@ -19,7 +19,8 @@
 | | `SUPABASE_SECRET_KEY` | **직접 입력해야 합니다.** Supabase 대시보드 → Project Settings → API Keys → Secret keys(`sb_secret_...`) |
 | | `ALLOWED_ORIGINS` | CORS 허용 주소(쉼표로 구분). 로컬: `http://localhost:5173` |
 
-`.env`와 `.env.local`은 Git에서 제외됩니다. 변수 이름은 각 폴더의 `.env.example`을 참고하세요.
+`.env`와 `.env.local`은 Git에서 제외. 
+변수 이름은 각 폴더의 `.env.example`을 참고.
 
 프로덕션 값은 Vercel 프로젝트 환경 변수에 저장되어 있습니다.
 
