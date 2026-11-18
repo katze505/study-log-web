@@ -7,6 +7,17 @@ export const CATEGORY = {
 
 export const SUBJECT_COLORS = ['#6366f1', '#8b5cf6', '#ec4899', '#f97316', '#eab308', '#10b981', '#06b6d4', '#64748b']
 
+export const EMAIL_DOMAINS = ['gmail.com', 'naver.com', 'daum.net', 'hanmail.net', 'kakao.com', 'outlook.com']
+
+// 같은 분류 안에서 팔레트 순서대로 묶고, 같은 색은 이름순 — 색을 바꾸면 자동으로 다시 정렬됨
+export function sortSubjects(subjects) {
+  const rank = (c) => {
+    const i = SUBJECT_COLORS.indexOf(c.toLowerCase())
+    return i === -1 ? SUBJECT_COLORS.length : i
+  }
+  return [...subjects].sort((a, b) => rank(a.color) - rank(b.color) || a.name.localeCompare(b.name, 'ko'))
+}
+
 export function today() {
   const d = new Date()
   d.setHours(0, 0, 0, 0)
@@ -37,4 +48,8 @@ export function sumBy(items, key) {
   const out = {}
   for (const item of items) out[item[key]] = (out[item[key]] || 0) + item.duration_minutes
   return out
+}
+
+export function monthRange(year, month) {
+  return { start: new Date(year, month, 1), end: new Date(year, month + 1, 0) }
 }

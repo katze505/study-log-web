@@ -13,6 +13,7 @@ export default function Subjects({ subjects, onChanged }) {
   const [color, setColor] = useState(SUBJECT_COLORS[0])
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [editing, setEditing] = useState(null) // 색을 바꾸는 중인 과목 id
 
   async function add(e) {
     e.preventDefault()
@@ -27,6 +28,18 @@ export default function Subjects({ subjects, onChanged }) {
       setError(err.message)
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function changeColor(subject, next) {
+    setEditing(null)
+    if (next === subject.color) return
+    setError('')
+    try {
+      await api(`/api/subjects/${subject.id}`, { method: 'PATCH', body: { color: next } })
+      await onChanged() // 새 색 기준으로 목록이 자동 정렬됨
+    } catch (err) {
+      setError(err.message)
     }
   }
 
@@ -87,7 +100,10 @@ export default function Subjects({ subjects, onChanged }) {
       </section>
 
       <section className="card">
-        <h2>내 과목</h2>
+        <div className="card-head">
+          <h2>내 과목</h2>
+          {subjects.length > 0 && <span className="hint">색 점을 누르면 색을 바꿀 수 있어요 · 색상순 자동 정렬</span>}
+        </div>
         {subjects.length === 0 && <p className="muted">아직 과목이 없어요. 왼쪽에서 추가해 보세요.</p>}
         {Object.entries(CATEGORY).map(([key, cat]) => {
           const items = subjects.filter((s) => s.category === key)
@@ -100,12 +116,34 @@ export default function Subjects({ subjects, onChanged }) {
               </h3>
               <ul className="list">
                 {items.map((s) => (
-                  <li key={s.id}>
-                    <span className="dot" style={{ background: s.color }} />
-                    <span className="grow">{s.name}</span>
-                    <button className="btn ghost small" onClick={() => remove(s)}>
-                      삭제
-                    </button>
+                  <li key={s.id} className="subject-item">
+                    <div className="subject-row">
+                      <button
+                        className="dot-btn"
+                        style={{ background: s.color }}
+                        onClick={() => setEditing(editing === s.id ? null : s.id)}
+                        aria-label={`${s.name} 색 바꾸기`}
+                        aria-expanded={editing === s.id}
+                      />
+                      <span className="grow">{s.name}</span>
+                      <button className="btn ghost small" onClick={() => remove(s)}>
+                        삭제
+                      </button>
+                    </div>
+                    {editing === s.id && (
+                      <div className="swatches small">
+                        {SUBJECT_COLORS.map((c) => (
+                          <button
+                            key={c}
+                            type="button"
+                            className={c === s.color.toLowerCase() ? 'swatch active' : 'swatch'}
+                            style={{ background: c }}
+                            onClick={() => changeColor(s, c)}
+                            aria-label={`색상 ${c}`}
+                          />
+                        ))}
+                      </div>
+                    )}
                   </li>
                 ))}
               </ul>

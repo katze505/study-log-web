@@ -4,9 +4,13 @@
 사용자 인증은 Supabase Auth의 access token을 검증해서 처리합니다.
 """
 
+import base64
+import json as jsonlib
 import os
-from datetime import date, timedelta
+import uuid
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal
+from uuid import UUID
 
 import httpx
 from dotenv import load_dotenv
@@ -100,16 +104,42 @@ def _session_payload(data: dict) -> dict:
     }
 
 
+def _verified_factors(user: dict) -> list[dict]:
+    return [f for f in user.get("factors") or [] if f.get("status") == "verified"]
+
+
+def _token_aal(token: str) -> str | None:
+    # /user 호출로 이미 검증된 토큰이므로 서명 확인 없이 aal 클레임만 읽음
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return jsonlib.loads(base64.urlsafe_b64decode(payload)).get("aal")
+    except (IndexError, ValueError):
+        return None
+
+
 async def current_user(authorization: str | None = Header(default=None)) -> dict:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "로그인이 필요합니다.")
-    res = await auth("GET", "/user", token=authorization[7:])
+    token = authorization[7:]
+    res = await auth("GET", "/user", token=token)
     if res.status_code != 200:
         raise HTTPException(401, "로그인이 만료되었습니다. 다시 로그인해 주세요.")
-    rows = await db("GET", "profiles", params={"id": f"eq.{res.json()['id']}", "select": "id,email,nickname"})
+    user = res.json()
+    verified = _verified_factors(user)
+    # 2차 인증을 켠 계정은 OTP까지 통과한 토큰(aal2)만 허용
+    if verified and _token_aal(token) != "aal2":
+        raise HTTPException(401, "2차 인증이 필요합니다. 다시 로그인해 주세요.")
+    rows = await db("GET", "profiles", params={"id": f"eq.{user['id']}", "select": "id,nickname"})
     if not rows:
         raise HTTPException(401, "프로필을 찾을 수 없습니다. 다시 가입해 주세요.")
-    return rows[0]
+    return {
+        **rows[0],
+        "email": user["email"],
+        "token": token,
+        "factors": user.get("factors") or [],
+        "factor_id": verified[0]["id"] if verified else None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -147,15 +177,42 @@ class RefreshIn(BaseModel):
     refresh_token: str
 
 
-async def _password_login(email: str, password: str) -> dict:
-    res = await auth("POST", "/token?grant_type=password", json={"email": email, "password": password})
+class MfaLoginIn(BaseModel):
+    mfa_token: str
+    factor_id: UUID
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+class MfaActivateIn(BaseModel):
+    factor_id: UUID
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+async def _touch_login(user_id: str) -> None:
+    await db(
+        "PATCH",
+        "accounts",
+        params={"id": f"eq.{user_id}"},
+        json={"last_login_at": datetime.now(timezone.utc).isoformat()},
+    )
+
+
+async def _verify_totp(token: str, factor_id: UUID, code: str) -> dict:
+    res = await auth("POST", f"/factors/{factor_id}/challenge", json={}, token=token)
     if res.status_code != 200:
-        raise HTTPException(401, "이메일 또는 비밀번호가 올바르지 않습니다.")
-    return _session_payload(res.json())
+        raise HTTPException(401, "2차 인증 시간이 지났습니다. 처음부터 다시 로그인해 주세요.")
+    res = await auth(
+        "POST", f"/factors/{factor_id}/verify", json={"challenge_id": res.json()["id"], "code": code}, token=token
+    )
+    if res.status_code != 200:
+        raise HTTPException(400, "인증 코드가 올바르지 않습니다. 앱에 표시된 최신 6자리 코드를 입력해 주세요.")
+    return res.json()
 
 
 @app.post("/api/auth/signup", status_code=201)
 async def signup(body: SignupIn):
+    """가입 정보는 accounts, 화면에 보이는 정보는 profiles에 따로 저장. 가입 후에는 로그인 화면에서 다시 로그인."""
+    email = body.email.lower()
     if await db("GET", "profiles", params={"nickname": f"eq.{body.nickname}", "select": "id"}):
         raise HTTPException(409, "이미 사용 중인 닉네임입니다.")
 
@@ -163,7 +220,7 @@ async def signup(body: SignupIn):
     res = await auth(
         "POST",
         "/admin/users",
-        json={"email": body.email, "password": body.password, "email_confirm": True},
+        json={"email": email, "password": body.password, "email_confirm": True},
         admin=True,
     )
     if res.status_code == 422:
@@ -173,16 +230,38 @@ async def signup(body: SignupIn):
     user_id = res.json()["id"]
 
     try:
-        await db("POST", "profiles", json={"id": user_id, "email": body.email, "nickname": body.nickname})
+        await db("POST", "accounts", json={"id": user_id, "email": email})
+        await db("POST", "profiles", json={"id": user_id, "nickname": body.nickname})
     except HTTPException:
-        await auth("DELETE", f"/admin/users/{user_id}", admin=True)
+        await auth("DELETE", f"/admin/users/{user_id}", admin=True)  # accounts/profiles도 함께 삭제(cascade)
         raise
-    return await _password_login(body.email, body.password)
+    return {"email": email}
 
 
 @app.post("/api/auth/login")
 async def login(body: LoginIn):
-    return await _password_login(body.email, body.password)
+    email = body.email.lower()
+    res = await auth("POST", "/token?grant_type=password", json={"email": email, "password": body.password})
+    if res.status_code == 429:
+        raise HTTPException(429, "로그인 시도가 너무 많습니다. 잠시 후 다시 시도해 주세요.")
+    if res.status_code != 200:
+        if not await db("GET", "accounts", params={"email": f"eq.{email}", "select": "id"}):
+            raise HTTPException(404, "가입된 회원 정보가 없습니다. 이메일을 확인하거나 회원가입해 주세요.")
+        raise HTTPException(401, "비밀번호가 올바르지 않습니다.")
+    data = res.json()
+    verified = _verified_factors(data.get("user") or {})
+    if verified:
+        # 비밀번호만 통과한 토큰(aal1)은 current_user에서 거부되므로, OTP 확인용으로만 돌려줌
+        return {"mfa_required": True, "mfa_token": data["access_token"], "factor_id": verified[0]["id"]}
+    await _touch_login(data["user"]["id"])
+    return _session_payload(data)
+
+
+@app.post("/api/auth/login/mfa")
+async def login_mfa(body: MfaLoginIn):
+    data = await _verify_totp(body.mfa_token, body.factor_id, body.code)
+    await _touch_login(data["user"]["id"])
+    return _session_payload(data)
 
 
 @app.post("/api/auth/refresh")
@@ -195,7 +274,57 @@ async def refresh(body: RefreshIn):
 
 @app.get("/api/me")
 async def me(user: dict = Depends(current_user)):
-    return user
+    rows = await db("GET", "accounts", params={"id": f"eq.{user['id']}", "select": "created_at"})
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "nickname": user["nickname"],
+        "joined_at": rows[0]["created_at"] if rows else None,
+        "mfa_enabled": bool(user["factor_id"]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 2차 인증 (TOTP: Google Authenticator 등 인증 앱)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/auth/mfa/enroll")
+async def mfa_enroll(user: dict = Depends(current_user)):
+    if user["factor_id"]:
+        raise HTTPException(409, "이미 2차 인증이 켜져 있습니다.")
+    # 이전에 끝내지 않은 등록은 정리하고 새로 시작
+    for factor in user["factors"]:
+        if factor.get("status") != "verified":
+            await auth("DELETE", f"/factors/{factor['id']}", token=user["token"])
+    res = await auth(
+        "POST",
+        "/factors",
+        json={"factor_type": "totp", "issuer": "StudyLog", "friendly_name": f"studylog-{uuid.uuid4().hex[:8]}"},
+        token=user["token"],
+    )
+    if res.status_code != 200:
+        raise HTTPException(502, "2차 인증을 등록하지 못했습니다.")
+    data = res.json()
+    qr = data["totp"]["qr_code"]
+    if not qr.startswith("data:"):  # Supabase는 SVG 원문을 주므로 <img src>에 바로 쓸 수 있게 변환
+        qr = "data:image/svg+xml;base64," + base64.b64encode(qr.encode()).decode()
+    return {"factor_id": data["id"], "qr_code": qr, "secret": data["totp"]["secret"]}
+
+
+@app.post("/api/auth/mfa/activate")
+async def mfa_activate(body: MfaActivateIn, user: dict = Depends(current_user)):
+    """첫 코드 확인으로 2차 인증을 켜고, 2차 인증까지 통과한 새 세션을 돌려줌."""
+    return _session_payload(await _verify_totp(user["token"], body.factor_id, body.code))
+
+
+@app.delete("/api/auth/mfa", status_code=204)
+async def mfa_disable(user: dict = Depends(current_user)):
+    if not user["factor_id"]:
+        raise HTTPException(404, "2차 인증이 켜져 있지 않습니다.")
+    res = await auth("DELETE", f"/factors/{user['factor_id']}", token=user["token"])
+    if res.status_code != 200:
+        raise HTTPException(502, "2차 인증을 끄지 못했습니다.")
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +336,10 @@ class SubjectIn(BaseModel):
     name: str = Field(min_length=1, max_length=30)
     category: Category
     color: str = Field(default="#6366f1", pattern=r"^#[0-9a-fA-F]{6}$")
+
+
+class SubjectColorIn(BaseModel):
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
 
 
 @app.get("/api/subjects")
@@ -236,6 +369,20 @@ async def create_subject(body: SubjectIn, user: dict = Depends(current_user)):
         raise
     row = rows[0]
     return {k: row[k] for k in ("id", "name", "category", "color")}
+
+
+@app.patch("/api/subjects/{subject_id}")
+async def update_subject_color(subject_id: str, body: SubjectColorIn, user: dict = Depends(current_user)):
+    rows = await db(
+        "PATCH",
+        "subjects",
+        params={"id": f"eq.{subject_id}", "user_id": f"eq.{user['id']}", "select": "id,name,category,color"},
+        json={"color": body.color.lower()},
+        returning=True,
+    )
+    if not rows:
+        raise HTTPException(404, "과목을 찾을 수 없습니다.")
+    return rows[0]
 
 
 @app.delete("/api/subjects/{subject_id}", status_code=204)

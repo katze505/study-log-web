@@ -15,7 +15,7 @@ function streak(byDay) {
   return count
 }
 
-export default function Dashboard({ subjects, sessions, onChanged, goToSubjects }) {
+export default function Dashboard({ subjects, sessions, onChanged, goToSubjects, goToHistory }) {
   const [deleting, setDeleting] = useState(null)
   const [error, setError] = useState('')
 
@@ -64,7 +64,12 @@ export default function Dashboard({ subjects, sessions, onChanged, goToSubjects 
       <Heatmap sessions={sessions} />
 
       <section className="card">
-        <h2>최근 기록</h2>
+        <div className="card-head">
+          <h2>최근 기록</h2>
+          <button className="btn ghost small" onClick={goToHistory}>
+            지난 기록 전체 보기 →
+          </button>
+        </div>
         {error && <p className="error">{error}</p>}
         {sessions.length === 0 ? (
           <p className="muted">아직 기록이 없어요. 첫 공부를 기록해 보세요!</p>

@@ -56,7 +56,7 @@ cd backend
 .venv/bin/python smoke_test.py https://study-log-api.vercel.app # 프로덕션 API
 ```
 
-회원가입 → 과목 추가 → 기록 저장 → 재로그인 후 재조회 → 친구 요청/수락 → 과목/기록 삭제를 실제 API로 확인합니다.
+회원가입 → 로그인 실패 구분(비밀번호 틀림/회원 없음) → 과목 추가·색 변경 → 기록 저장 → 재로그인 후 재조회 → 친구 요청/수락 → 과목/기록 삭제 → 2차 인증 등록·로그인·해제를 실제 API로 확인합니다. (2차 인증 단계에서 코드 재사용을 피하려고 약 30초 기다립니다.)
 
 ## 배포
 
@@ -66,4 +66,12 @@ VERCEL_ORG_ID=team_GK7I34NHVue1gHqIxOhfTh60 VERCEL_PROJECT_ID=prj_z3QJ2tI3QB2Lwm
 VERCEL_ORG_ID=team_GK7I34NHVue1gHqIxOhfTh60 VERCEL_PROJECT_ID=prj_VvCcHia4UDHxtcAmnBR1XCsQspvV vercel deploy --prod  # 프런트엔드
 ```
 
-DB 스키마: `supabase/migrations/20261028000000_init_study_log.sql`
+DB 스키마: `supabase/migrations/`
+
+| 테이블 | 내용 |
+| --- | --- |
+| `accounts` | 회원가입 정보 (이메일, 가입일, 마지막 로그인) |
+| `profiles` | 화면에 보이는 프로필 (닉네임) |
+| `subjects`, `study_sessions`, `friendships` | 과목, 공부 기록, 친구 |
+
+로그인 2차 인증은 Supabase Auth의 TOTP(인증 앱) 기능을 사용하므로 별도 테이블이 없습니다.
